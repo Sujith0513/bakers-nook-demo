@@ -62,7 +62,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .hero-title{font-size:clamp(3rem,7.6vw,7rem)}
 .hero-sub{max-width:38ch;color:var(--text2);font-size:clamp(1rem,1.25vw,1.15rem);margin:1.5rem 0 2rem}
 .hero-cta{display:flex;flex-wrap:wrap;gap:16px 26px;align-items:center}
-.hero-look{position:absolute;right:var(--gut);top:50%;z-index:2;max-width:250px;opacity:0;pointer-events:none}
+.hero-look{position:absolute;right:var(--gut);top:40%;z-index:2;max-width:250px;opacity:0;pointer-events:none}
 .hero-look p{font-family:'Fraunces',serif;font-size:1.5rem;line-height:1.2}
 .hero-look ul{list-style:none;margin-top:14px;display:grid;gap:8px;font-size:.92rem;color:var(--text2)}
 .hero-look li{display:flex;gap:10px;align-items:center}
@@ -318,7 +318,7 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
   /* ---------- smooth scroll ---------- */
   let lenis = null;
   if (motion && window.Lenis) {
-    lenis = new Lenis({ lerp: 0.09 });
+    lenis = new Lenis({ lerp: 0.1, wheelMultiplier: 0.9 });
     lenis.on('scroll', ScrollTrigger.update);
     gsap.ticker.add(t => lenis.raf(t * 1000));
     gsap.ticker.lagSmoothing(0);
@@ -355,9 +355,11 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
   }
   function makeRenderer(canvas) {
     let r;
-    try { r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true }); } catch (e) { return null; }
-    r.setPixelRatio(Math.min(devicePixelRatio, innerWidth < 760 ? 1.5 : 2));
+    try { r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' }); } catch (e) { return null; }
+    r.setPixelRatio(Math.min(devicePixelRatio, 1.5));
     r.outputEncoding = THREE.sRGBEncoding;
+    r.toneMapping = THREE.ACESFilmicToneMapping; r.toneMappingExposure = 1.05;
+    r.shadowMap.enabled = true; r.shadowMap.type = THREE.PCFSoftShadowMap;
     return r;
   }
   function fit(renderer, camera, canvas) {
@@ -366,39 +368,114 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
     camera.aspect = w / h; camera.updateProjectionMatrix();
     return w / h;
   }
-  function lights(scene, warmth = 1) {
-    scene.add(new THREE.HemisphereLight(0xfffaf2, 0xd9cbb5, 0.55));
-    const key = new THREE.DirectionalLight(0xffffff, 0.95); key.position.set(4, 8, 7); scene.add(key);
-    const warm = new THREE.PointLight(0xffc38a, 0.9 * warmth, 30); warm.position.set(-6, 3, 5); scene.add(warm);
-    const fill = new THREE.DirectionalLight(0xfff1e0, 0.35); fill.position.set(-3, 2, -6); scene.add(fill);
+  // A small photo studio (soft boxes in a warm room) baked into an environment map,
+  // so glossy chocolate and ceramic get real reflections.
+  function studio(renderer, scene, shadowSpan = 4) {
+    const pm = new THREE.PMREMGenerator(renderer), room = new THREE.Scene();
+    room.add(new THREE.Mesh(new THREE.BoxGeometry(30, 30, 30), new THREE.MeshBasicMaterial({ color: 0x1c1612, side: THREE.BackSide })));
+    const box = (w, h, x, y, z, k) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ color: new THREE.Color(k, k * 0.96, k * 0.9), side: THREE.DoubleSide })); m.position.set(x, y, z); m.lookAt(0, 0, 0); room.add(m); };
+    box(12, 6, 0, 13, 2, 4); box(6, 10, -12, 3, 6, 3); box(5, 9, 12, 2, -4, 1.8); box(14, 3, 0, 1, -13, 1.1); box(3, 8, 9, 2, 10, 1.6);
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), new THREE.MeshBasicMaterial({ color: 0x2a2018 })); floor.rotation.x = -Math.PI / 2; floor.position.y = -8; room.add(floor);
+    scene.environment = pm.fromScene(room, 0.03).texture; pm.dispose();
+    scene.add(new THREE.HemisphereLight(0xfff6ea, 0x8a7563, 0.55));
+    const key = new THREE.DirectionalLight(0xfff1de, 1.55); key.position.set(4, 9, 6);
+    key.castShadow = true; key.shadow.mapSize.set(1024, 1024); key.shadow.bias = -0.0004; key.shadow.normalBias = 0.02; key.shadow.radius = 4;
+    Object.assign(key.shadow.camera, { left: -shadowSpan, right: shadowSpan, top: shadowSpan, bottom: -shadowSpan, near: 1, far: 30 });
+    scene.add(key);
+    const rim = new THREE.DirectionalLight(0xffd9b0, 0.7); rim.position.set(-6, 4, -6); scene.add(rim);
+    return key;
   }
-  const mat = (color, roughness = 0.7, metalness = 0, side) => new THREE.MeshStandardMaterial({ color, roughness, metalness, side: side || THREE.FrontSide });
+  const shadowsOn = o => o.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true; } });
+  const TAU = Math.PI * 2;
+
+  // canvas textures: sponge crumb, fine noise for cream and macaron shells, soft contact shadow
+  function canvasTex(draw, size = 256, repeat = [1, 1]) {
+    const c = document.createElement('canvas'); c.width = c.height = size;
+    draw(c.getContext('2d'), size);
+    const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(...repeat); t.encoding = THREE.sRGBEncoding; t.anisotropy = 4;
+    return t;
+  }
+  const crumb = hex => canvasTex((x, s) => {
+    x.fillStyle = hex; x.fillRect(0, 0, s, s);
+    for (let i = 0; i < 2600; i++) {
+      const r = Math.random() * 2.4 + 0.3, dark = Math.random() < 0.62;
+      x.fillStyle = dark ? `rgba(40,20,10,${0.08 + Math.random() * 0.22})` : `rgba(255,236,205,${Math.random() * 0.16})`;
+      x.beginPath(); x.ellipse(Math.random() * s, Math.random() * s, r, r * (0.5 + Math.random() * 0.6), Math.random() * 3, 0, TAU); x.fill();
+    }
+  }, 256, [7, 1]);
+  const fineNoise = (hex, n = 4000, a = 0.07) => canvasTex((x, s) => {
+    x.fillStyle = hex; x.fillRect(0, 0, s, s);
+    for (let i = 0; i < n; i++) { x.fillStyle = `rgba(${Math.random() < 0.5 ? '0,0,0' : '255,255,255'},${Math.random() * a})`; x.fillRect(Math.random() * s, Math.random() * s, 1.5, 1.5); }
+  }, 256, [4, 4]);
+  const contactTex = canvasTex((x, s) => {
+    const g = x.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    g.addColorStop(0, 'rgba(42,29,23,0.42)'); g.addColorStop(0.45, 'rgba(42,29,23,0.16)'); g.addColorStop(1, 'rgba(42,29,23,0)');
+    x.fillStyle = g; x.fillRect(0, 0, s, s);
+  }, 256);
+  contactTex.encoding = THREE.LinearEncoding;
+  function contactShadow(size, y) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicMaterial({ map: contactTex, transparent: true, depthWrite: false }));
+    m.rotation.x = -Math.PI / 2; m.position.y = y; m.renderOrder = -1; return m;
+  }
+
+  const sponge = (hex) => { const t = crumb(hex); return new THREE.MeshStandardMaterial({ map: t, bumpMap: t, bumpScale: 0.025, roughness: 0.95, side: THREE.DoubleSide }); };
+  const creamTex = fineNoise('#f4ecdf', 3000, 0.05);
   const M = {
-    choc: mat(0x5A3A2A, 0.9, 0, THREE.DoubleSide), vanilla: mat(0xE3C08E, 0.9, 0, THREE.DoubleSide),
-    rasamalai: mat(0xE9C27A, 0.9, 0, THREE.DoubleSide), coffee: mat(0x8A6347, 0.9, 0, THREE.DoubleSide),
-    cream: mat(0xF3EBDD, 0.75, 0, THREE.DoubleSide),
-    ganache: mat(0x120A07, 0.18, 0.3, THREE.DoubleSide), freshCream: mat(0xF1E8DA, 0.6, 0, THREE.DoubleSide), caramel: mat(0xB97F4B, 0.32, 0.15, THREE.DoubleSide),
-    gold: mat(0xC9A06A, 0.25, 0.9), stand: mat(0xF7F2EA, 0.35, 0.05), standDark: mat(0x3A2A22, 0.4, 0.2)
+    choc: sponge('#4a2b1d'), vanilla: sponge('#e2bd86'), rasamalai: sponge('#e6bf72'), coffee: sponge('#7d573c'),
+    cream: new THREE.MeshStandardMaterial({ map: creamTex, bumpMap: creamTex, bumpScale: 0.01, roughness: 0.55, side: THREE.DoubleSide }),
+    ganache: new THREE.MeshPhysicalMaterial({ color: 0x070302, roughness: 0.16, clearcoat: 1, clearcoatRoughness: 0.06, side: THREE.DoubleSide }),
+    freshCream: new THREE.MeshPhysicalMaterial({ color: 0xe6d8c2, roughness: 0.42, clearcoat: 0.25, clearcoatRoughness: 0.4, side: THREE.DoubleSide }),
+    caramel: new THREE.MeshPhysicalMaterial({ color: 0x4a1904, roughness: 0.14, clearcoat: 1, clearcoatRoughness: 0.05, side: THREE.DoubleSide }),
+    gold: new THREE.MeshStandardMaterial({ color: 0xb07a35, roughness: 0.22, metalness: 1 }),
+    goldLeaf: new THREE.MeshStandardMaterial({ color: 0xbc8540, roughness: 0.3, metalness: 1, side: THREE.DoubleSide }),
+    shard: new THREE.MeshPhysicalMaterial({ color: 0x050201, roughness: 0.25, clearcoat: 0.8, clearcoatRoughness: 0.15 }),
+    china: new THREE.MeshPhysicalMaterial({ color: 0xf8f4ee, roughness: 0.18, clearcoat: 1, clearcoatRoughness: 0.08 })
   };
   const FLAVOUR = { Chocolate: ['choc', 'choc'], Vanilla: ['vanilla', 'vanilla'], Rasamalai: ['rasamalai', 'rasamalai'], Coffee: ['coffee', 'choc'] };
   const FINISH = { 'Chocolate ganache': 'ganache', 'Fresh cream': 'freshCream', Caramel: 'caramel' };
-  const TAU = Math.PI * 2;
+
+  // A drip: a thin trail that ends in a rounded bead. Unit length, scaled per instance.
+  const dripGeo = new THREE.LatheGeometry([[0, 0.03], [0.034, 0.03], [0.036, -0.25], [0.034, -0.62], [0.042, -0.84], [0.05, -0.93], [0.042, -0.99], [0, -1.01]].map(([r, y]) => new THREE.Vector2(r, y)), 14);
+  // A piped star rosette: a ridged swirl that tapers to a point.
+  const rosetteGeo = (() => {
+    const S = 56, H = 26, pos = [], idx = [];
+    for (let i = 0; i <= H; i++) {
+      const h = i / H, rad = 0.5 * Math.pow(1 - h, 0.75) * (h < 0.12 ? 0.86 + h : 1);
+      for (let j = 0; j <= S; j++) {
+        const th = j / S * TAU, r = rad * (1 + 0.17 * Math.cos(8 * th + h * 9));
+        pos.push(Math.sin(th) * r, h, Math.cos(th) * r);
+      }
+    }
+    for (let i = 0; i < H; i++) for (let j = 0; j < S; j++) { const a = i * (S + 1) + j, b = a + S + 1; idx.push(a, b, a + 1, b, b + 1, a + 1); }
+    const g = new THREE.BufferGeometry(); g.setIndex(idx); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.computeVertexNormals();
+    return g;
+  })();
+  const pearlGeo = new THREE.SphereGeometry(1, 20, 14);
+  const mtx = (x, y, z, sx, sy, sz, ry = 0, rx = 0, rz = 0) => new THREE.Matrix4().compose(new THREE.Vector3(x, y, z), new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz)), new THREE.Vector3(sx, sy, sz));
+  function batch(geo, mat, list) {
+    const m = new THREE.InstancedMesh(geo, mat, Math.max(1, list.length));
+    list.forEach((mm, i) => m.setMatrixAt(i, mm)); m.count = list.length;
+    return m;
+  }
 
   // A cake built from stacked cylinder sectors. The missing wedge exposes the layers inside;
   // the wedge itself is a separate group that can slide out.
-  function buildCake({ tiers = 2, flavour = 'Chocolate', finish = 'Chocolate ganache', wedge = 0.62, wedgeAt = 0.55, deco = true }) {
+  function buildCake({ tiers = 2, flavour = 'Chocolate', finish = 'Chocolate ganache', wedge = 0.62, wedgeAt = 0.55, seed = 7 }) {
+    let sd = seed; const rnd = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
     const cake = new THREE.Group(), slice = new THREE.Group(); cake.add(slice);
     const [s1, s2] = FLAVOUR[flavour].map(k => M[k]);
     const shell = M[FINISH[finish]];
     const t0 = wedgeAt - wedge / 2, mainStart = t0 + wedge, mainLen = TAU - wedge;
     const sizes = [[1.55, 1.1], [1.05, 0.88], [0.66, 0.7]].slice(0, tiers);
-    const sector = (r, h, a0, al, m) => new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 96, 1, false, a0, al), m);
+    const sector = (r, h, a0, al, m) => new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 110, 1, false, a0, al), m);
     const cap = (r0, r1, h, th, m) => { const w = r1 - r0, p = new THREE.Mesh(new THREE.PlaneGeometry(w, h), m); p.rotation.y = th - Math.PI / 2; const c = r0 + w / 2; p.position.set(Math.sin(th) * c, 0, Math.cos(th) * c); return p; };
-    const inWedge = a => { const d = ((a - t0) % TAU + TAU) % TAU; return d < wedge; };
+    const inWedge = a => (((a - t0) % TAU) + TAU) % TAU < wedge;
+    const lists = { slice: { drip: [], ros: [], pearl: [] }, cake: { drip: [], ros: [], pearl: [] } };
+    const pick = a => inWedge(a) ? lists.slice : lists.cake;
     let y = 0;
     sizes.forEach(([r, h], ti) => {
       const k = h / 1.1;
-      const layers = [[s1, 0.3 * k], [M.cream, 0.08 * k], [s2 === s1 ? s1 : s2, 0.26 * k], [M.cream, 0.08 * k], [s1, 0.38 * k]];
+      const layers = [[s1, 0.3 * k], [M.cream, 0.075 * k], [s2, 0.27 * k], [M.cream, 0.075 * k], [s1, 0.38 * k]];
       [[slice, t0, wedge], [cake, mainStart, mainLen]].forEach(([g, a0, al]) => {
         let ly = y;
         layers.forEach(([m, lh]) => {
@@ -406,96 +483,93 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
           [a0, a0 + al].forEach(th => { const c = cap(0, r, lh, th, m); c.position.y = ly + lh / 2; g.add(c); });
           ly += lh;
         });
-        // frosting: an outer band plus a top layer
-        const sh = sector(r + 0.05, h + 0.05, a0, al, shell); sh.position.y = y + (h + 0.05) / 2; g.add(sh);
+        const sh = sector(r + 0.045, h + 0.05, a0, al, shell); sh.position.y = y + (h + 0.05) / 2; g.add(sh);
         [a0, a0 + al].forEach(th => {
-          const band = cap(r, r + 0.05, h + 0.05, th, shell); band.position.y = y + (h + 0.05) / 2; g.add(band);
-          const topc = cap(0, r + 0.05, 0.05, th, shell); topc.position.y = y + h + 0.025; g.add(topc);
+          const band = cap(r, r + 0.045, h + 0.05, th, shell); band.position.y = y + (h + 0.05) / 2; g.add(band);
+          const topc = cap(0, r + 0.045, 0.05, th, shell); topc.position.y = y + h + 0.025; g.add(topc);
         });
+        // a rounded lip where the glaze rolls over the edge
+        const lip = new THREE.Mesh(new THREE.TorusGeometry(r + 0.03, 0.035, 10, 96, al), shell);
+        lip.rotation.x = -Math.PI / 2;
+        const lg = new THREE.Group(); lg.rotation.y = a0 - Math.PI / 2; lg.position.y = y + h + 0.045; lg.add(lip); g.add(lg);
       });
-      // drips hanging from the top edge
-      const n = Math.round(r * 16);
+      const n = Math.round(r * 19);
       for (let i = 0; i < n; i++) {
-        const a = (i + Math.random() * 0.5) / n * TAU, len = 0.08 + Math.random() * 0.3 * k;
-        const g = inWedge(a) ? slice : cake;
-        const d = new THREE.Group();
-        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, len, 8), shell); stem.position.y = -len / 2; d.add(stem);
-        const tip = new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 8), shell); tip.position.y = -len; d.add(tip);
-        d.position.set(Math.sin(a) * (r + 0.05), y + h + 0.03, Math.cos(a) * (r + 0.05));
-        g.add(d);
+        const a = (i + rnd() * 0.6) / n * TAU, len = (0.1 + Math.pow(rnd(), 1.6) * 0.42) * k;
+        pick(a).drip.push(mtx(Math.sin(a) * (r + 0.04), y + h + 0.05, Math.cos(a) * (r + 0.04), 1, len, 1));
       }
-      // cream rosettes around the top rim
-      if (deco) {
-        const rn = Math.round(r * 9), rr = r - 0.14;
-        for (let i = 0; i < rn; i++) {
-          const a = i / rn * TAU + 0.15, g = inWedge(a) ? slice : cake;
-          const ro = new THREE.Group();
-          const base = new THREE.Mesh(new THREE.SphereGeometry(0.085, 14, 10), M.freshCream); base.scale.set(1, 0.7, 1); ro.add(base);
-          const top = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.12, 12), M.freshCream); top.position.y = 0.08; ro.add(top);
-          ro.position.set(Math.sin(a) * rr, y + h + 0.1, Math.cos(a) * rr);
-          g.add(ro);
-        }
+      const rn = Math.round(r * 8.5), rr = r - 0.15;
+      for (let i = 0; i < rn; i++) {
+        const a = i / rn * TAU + 0.2, sc = 0.2 + rnd() * 0.02;
+        pick(a).ros.push(mtx(Math.sin(a) * rr, y + h + 0.05, Math.cos(a) * rr, sc * 0.95, sc * 1.05, sc * 0.95, rnd() * TAU));
+        const a2 = a + Math.PI / rn;
+        pick(a2).pearl.push(mtx(Math.sin(a2) * rr, y + h + 0.085, Math.cos(a2) * rr, 0.035, 0.035, 0.035));
       }
       y += h + 0.05;
-      if (ti === sizes.length - 1 && deco) {
-        // gold leaf and caramel pearls on the top tier
-        for (let i = 0; i < 7; i++) {
-          const leaf = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.12), new THREE.MeshStandardMaterial({ color: 0xC9A06A, metalness: 1, roughness: 0.3, side: THREE.DoubleSide }));
-          const a = Math.random() * TAU, rad = Math.random() * r * 0.45;
-          leaf.position.set(Math.sin(a) * rad, y + 0.03 + Math.random() * 0.04, Math.cos(a) * rad);
-          leaf.rotation.set(-Math.PI / 2 + (Math.random() - 0.5) * 0.8, 0, Math.random() * TAU);
-          cake.add(leaf);
-        }
-        for (let i = 0; i < 5; i++) {
-          const p = new THREE.Mesh(new THREE.SphereGeometry(0.06, 14, 10), M.gold);
-          const a = i / 5 * TAU + 0.4; p.position.set(Math.sin(a) * r * 0.28, y + 0.05, Math.cos(a) * r * 0.28);
-          cake.add(p);
-        }
-      }
     });
-    // stand
-    const plate = new THREE.Mesh(new THREE.CylinderGeometry(2.05, 2.0, 0.07, 80), M.stand); plate.position.y = -0.035; cake.add(plate);
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(2.04, 0.02, 8, 100), M.gold); rim.rotation.x = Math.PI / 2; rim.position.y = -0.005; cake.add(rim);
-    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, 0.75, 32), M.stand); stem.position.y = -0.45; cake.add(stem);
-    const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.85, 0.08, 64), M.stand); foot.position.y = -0.85; cake.add(foot);
-    const dir = new THREE.Vector3(Math.sin(wedgeAt), 0, Math.cos(wedgeAt));
-    return { cake, slice, dir, height: y };
+    // top tier: chocolate shards, gold leaf and pearls
+    const topR = sizes[sizes.length - 1][0];
+    for (let i = 0; i < 3; i++) {
+      const sh = new THREE.Mesh(new THREE.BoxGeometry(0.34 - i * 0.06, 0.4 - i * 0.07, 0.02), M.shard);
+      sh.position.set((i - 1) * 0.16, y + 0.17, -0.05 + i * 0.07); sh.rotation.set(-0.2, 0.4 + i * 0.5, (i - 1) * 0.35); cake.add(sh);
+    }
+    for (let i = 0; i < 6; i++) {
+      const leaf = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 0.11, 3, 3), M.goldLeaf);
+      const p = leaf.geometry.attributes.position; for (let v = 0; v < p.count; v++) p.setZ(v, (rnd() - 0.5) * 0.03);
+      leaf.geometry.computeVertexNormals();
+      const a = rnd() * TAU, rad = topR * (0.25 + rnd() * 0.3);
+      leaf.position.set(Math.sin(a) * rad, y + 0.015, Math.cos(a) * rad); leaf.rotation.set(-Math.PI / 2 + (rnd() - 0.5) * 0.5, 0, rnd() * TAU);
+      cake.add(leaf);
+    }
+    [['slice', slice], ['cake', cake]].forEach(([key, g]) => {
+      const L = lists[key];
+      if (L.drip.length) g.add(batch(dripGeo, shell, L.drip));
+      if (L.ros.length) g.add(batch(rosetteGeo, M.freshCream, L.ros));
+      if (L.pearl.length) g.add(batch(pearlGeo, M.gold, L.pearl));
+    });
+    // cake stand
+    const plate = new THREE.Mesh(new THREE.CylinderGeometry(2.05, 1.98, 0.07, 96), M.china); plate.position.y = -0.035; cake.add(plate);
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(2.04, 0.018, 8, 120), M.gold); rim.rotation.x = Math.PI / 2; rim.position.y = -0.004; cake.add(rim);
+    const stem = new THREE.Mesh(new THREE.LatheGeometry([[0.2, -0.07], [0.15, -0.3], [0.13, -0.55], [0.3, -0.75], [0.78, -0.86], [0.8, -0.9], [0, -0.9]].map(([r, yy]) => new THREE.Vector2(r, yy)), 64), M.china);
+    cake.add(stem);
+    shadowsOn(cake);
+    cake.add(contactShadow(4.6, -0.895));
+    return { cake, slice, dir: new THREE.Vector3(Math.sin(wedgeAt), 0, Math.cos(wedgeAt)), height: y };
   }
-  function disposeTree(o) { o.traverse(n => { if (n.geometry) n.geometry.dispose(); }); }
+  function disposeTree(o) { o.traverse(n => { if (n.geometry && n.geometry !== dripGeo && n.geometry !== rosetteGeo && n.geometry !== pearlGeo) n.geometry.dispose(); }); }
 
-  /* ---------- hero cake ---------- */
+  /* ---------- hero cake: slides right to left while a slice comes out ---------- */
   function initHero() {
     const canvas = document.getElementById('cake');
     if (!window.THREE) return null;
     const renderer = makeRenderer(canvas); if (!renderer) return null;
     const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
-    lights(scene);
-    const { cake, slice, dir } = buildCake({ tiers: 2 });
+    const key = studio(renderer, scene, 3.2);
+    const { cake, slice, dir } = buildCake({ tiers: 2, wedgeAt: 1.7 });
     const holder = new THREE.Group(); holder.add(cake); scene.add(holder);
     cake.position.y = -0.9;
-    // crumbs on the counter
+    key.target = holder;
     let mobile = false;
     function layout() { mobile = fit(renderer, camera, canvas) < 1; }
     layout(); addEventListener('resize', layout);
     let rotY = 0, vel = 0, drag = false, lastX = 0;
     canvas.addEventListener('pointerdown', e => { drag = true; lastX = e.clientX; canvas.setPointerCapture(e.pointerId); });
-    canvas.addEventListener('pointermove', e => { if (!drag) return; vel = (e.clientX - lastX) * 0.008; lastX = e.clientX; rotY += vel; });
+    canvas.addEventListener('pointermove', e => { if (!drag) return; vel = (e.clientX - lastX) * 0.006; lastX = e.clientX; rotY += vel; });
     ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => canvas.addEventListener(ev, () => drag = false));
     const state = { target: 0, p: 0, pop: cake };
     loop(canvas, (t, dt) => {
-      state.p += (state.target - state.p) * damp(0.08, dt);
-      const p = state.p, s = ease(clamp(p / 0.7));
-      if (!drag) { vel *= 0.94; rotY += vel; }
-      // turn so the cut faces the camera while the slice slides out
-      holder.rotation.y = rotY + lerp(-0.25 + Math.sin(t * 0.3) * 0.12, mobile ? -1.3 : -1.75, s) + mx * 0.15;
-      holder.rotation.x = 0.04 + my * 0.06;
-      slice.position.copy(dir).multiplyScalar(s * (mobile ? 1.15 : 1.7));
-      slice.position.y = s * 0.15 + Math.sin(t * 1.4) * 0.02 * s;
-      slice.rotation.y = s * 0.55;
-      holder.position.set(mobile ? 0 : lerp(2.6, 2.1, s), 0.1, 0);
-      const d = mobile ? 19 : lerp(11.5, 9.8, s);
-      camera.position.set(mobile ? 0 : holder.position.x * 0.1, (mobile ? 3.2 : 2.6), d);
-      camera.lookAt(mobile ? 0 : holder.position.x * 0.3, holder.position.y + (mobile ? -2.7 : 0.1), 0);
+      state.p += (state.target - state.p) * damp(0.12, dt);
+      const s = ease(clamp(state.p / 0.6));
+      if (!drag) { vel *= 0.92; rotY += vel; rotY *= 0.985; }
+      // a gentle turn only; the slice does the talking
+      holder.rotation.y = rotY + lerp(-0.2 + Math.sin(t * 0.35) * 0.05, -0.6, s) + mx * 0.06;
+      holder.position.set(mobile ? 0 : lerp(2.3, -0.7, s), mobile ? 0.1 : 0.05, 0);
+      key.position.set(holder.position.x + 4, 9, 6);
+      slice.position.copy(dir).multiplyScalar(s * (mobile ? 0.85 : 1.15));
+      slice.position.y = s * 0.08;
+      slice.rotation.y = s * 0.22;
+      camera.position.set(mx * 0.25, mobile ? 3.2 : 2.5, mobile ? 19 : lerp(11, 10.4, s));
+      camera.lookAt(0, mobile ? -2.6 : 0.15, 0);
       renderer.render(scene, camera);
     });
     return state;
@@ -510,7 +584,7 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
     gsap.from('.hero-copy .eyebrow, .hero-sub, .hero-cta, .hint', { opacity: 0, y: 24, duration: 1, ease: 'power3.out', stagger: 0.08, delay: d + 0.35 });
     if (hero) {
       gsap.from(hero.pop.scale, { x: 0.001, y: 0.001, z: 0.001, duration: 1.6, ease: 'back.out(1.6)', delay: d - 0.1 });
-      gsap.from(hero.pop.rotation, { y: -3, duration: 2, ease: 'expo.out', delay: d - 0.1 });
+      gsap.from(hero.pop.rotation, { y: -1.2, duration: 2, ease: 'expo.out', delay: d - 0.1 });
     }
   }
   if (!motion) intro.remove();
@@ -528,12 +602,12 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
   const nav = document.getElementById('nav'), prog = document.getElementById('progress');
   if (motion) {
     ScrollTrigger.create({ start: 0, end: 'max', onUpdate: s => { nav.classList.toggle('hide', s.direction === 1 && s.scroll() > 160); prog.style.transform = `scaleX(${s.progress})`; } });
-    const tl = gsap.timeline({ scrollTrigger: { trigger: '.hero', start: 'top top', end: '+=130%', pin: true, scrub: true, onUpdate: s => { if (hero) hero.target = s.progress; } } });
-    tl.to('.hero-copy', { x: -60, opacity: 0, ease: 'power1.in', duration: 0.35 }, 0.05)
+    const tl = gsap.timeline({ scrollTrigger: { trigger: '.hero', start: 'top top', end: '+=85%', pin: true, scrub: true, onUpdate: s => { if (hero) hero.target = s.progress; } } });
+    tl.to('.hero-copy', { x: -40, opacity: 0, ease: 'power1.in', duration: 0.3 }, 0)
       .to('.hint', { opacity: 0, duration: 0.1 }, 0)
-      .fromTo('.hero-look', { opacity: 0, y: 30 }, { opacity: 1, y: -40, duration: 0.3 }, 0.45)
-      .fromTo('.hero-look li', { opacity: 0, x: 20 }, { opacity: 1, x: 0, stagger: 0.05, duration: 0.2 }, 0.5)
-      .to({}, { duration: 0.2 });
+      .fromTo('.hero-look', { opacity: 0, y: 20 }, { opacity: 1, y: -30, duration: 0.3 }, 0.3)
+      .fromTo('.hero-look li', { opacity: 0, x: 16 }, { opacity: 1, x: 0, stagger: 0.04, duration: 0.18 }, 0.36)
+      .to({}, { duration: 0.25 });
   }
 
   /* ---------- statement: words fade up ---------- */
@@ -548,7 +622,7 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
       const next = mc[i + 1];
       gsap.from(c.querySelector('.mcard-art svg'), { scale: 0.7, rotation: -12, opacity: 0, duration: 1.1, ease: 'expo.out', scrollTrigger: { trigger: c, start: 'top 75%' } });
       if (!next) return;
-      gsap.fromTo(c, { scale: 1, y: 0, filter: 'brightness(1)' }, { scale: 0.92, y: -20, filter: 'brightness(0.86)', ease: 'none', scrollTrigger: { trigger: next, start: 'top bottom', end: 'top 12%', scrub: true } });
+      gsap.fromTo(c, { scale: 1, y: 0 }, { scale: 0.93, y: -18, ease: 'none', scrollTrigger: { trigger: next, start: 'top bottom', end: 'top 12%', scrub: true } });
     });
   }
 
@@ -567,8 +641,8 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
     let scene, camera, renderer, holder, current = null, slice = null, dir = null, pop = 0;
     if (window.THREE && (renderer = makeRenderer(canvas))) {
       scene = new THREE.Scene(); camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
-      lights(scene, 1.2);
-      holder = new THREE.Group(); scene.add(holder);
+      const key = studio(renderer, scene, 3.5);
+      holder = new THREE.Group(); scene.add(holder); key.target = holder;
       let aspect = 1;
       const layout = () => { aspect = fit(renderer, camera, canvas); };
       layout(); addEventListener('resize', layout);
@@ -577,11 +651,11 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
       canvas.addEventListener('pointermove', e => { if (!drag) return; vel = (e.clientX - lastX) * 0.008; lastX = e.clientX; rotY += vel; });
       ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => canvas.addEventListener(ev, () => drag = false));
       loop(canvas, (t, dt) => {
-        if (!drag) { vel *= 0.94; rotY += vel + 0.0025; }
+        if (!drag) { vel *= 0.94; rotY += vel + 0.15 * dt; }
         holder.rotation.y = rotY;
         pop += (1 - pop) * damp(0.12, dt);
-        if (current) { current.scale.setScalar(0.6 + 0.4 * ease(pop)); current.position.y = -0.9 + (1 - pop) * 0.6; }
-        if (slice) slice.position.copy(dir).multiplyScalar(0.55 + Math.sin(t * 1.2) * 0.05);
+        if (current) { current.scale.setScalar(0.7 + 0.3 * ease(pop)); current.position.y = -0.9 + (1 - pop) * 0.4; }
+        if (slice) slice.position.copy(dir).multiplyScalar(0.5 + Math.sin(t * 1.2) * 0.04);
         const h = 0.9 + opts.tiers * 0.45;
         camera.position.set(0, 2.4 + opts.tiers * 0.35, (aspect < 1 ? 13 : 10.5) + opts.tiers * 0.6);
         camera.lookAt(0, h * 0.35 - 0.6, 0);
@@ -621,36 +695,48 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
     const canvas = document.getElementById('treat');
     if (!window.THREE) return null;
     const renderer = makeRenderer(canvas); if (!renderer) return null;
+    renderer.toneMappingExposure = 1.15;
     const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
     camera.position.set(0, 0, 16);
-    lights(scene, 1.4);
-    // cupcake: ridged liner, sponge dome, swirl of cream
+    studio(renderer, scene, 8);
+    // cupcake: pleated paper liner, crumb dome, piped swirl
     const cup = new THREE.Group();
-    const liner = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 0.62, 0.9, 24, 1, false), new THREE.MeshStandardMaterial({ color: 0xB97F4B, roughness: 0.5, metalness: 0.2, flatShading: true }));
-    cup.add(liner);
-    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.86, 32, 16, 0, TAU, 0, Math.PI / 2), M.choc); dome.position.y = 0.45; dome.scale.y = 0.45; cup.add(dome);
-    for (let i = 0; i < 4; i++) {
-      const r = 0.72 - i * 0.17;
-      const tor = new THREE.Mesh(new THREE.TorusGeometry(r, 0.2 - i * 0.03, 16, 48), M.freshCream);
-      tor.rotation.x = Math.PI / 2; tor.position.y = 0.72 + i * 0.26; cup.add(tor);
-    }
-    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.36, 20), M.freshCream); tip.position.y = 1.78; cup.add(tip);
-    const pearl = new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12), M.gold); pearl.position.set(0.2, 1.62, 0.3); cup.add(pearl);
-    scene.add(cup);
-    // macaron
+    const linerGeo = new THREE.CylinderGeometry(0.86, 0.62, 0.92, 48, 1, true);
+    const lp = linerGeo.attributes.position;
+    for (let i = 0; i < lp.count; i++) { const x = lp.getX(i), z = lp.getZ(i), a = Math.atan2(x, z), k = 1 + 0.035 * Math.cos(a * 24); lp.setX(i, x * k); lp.setZ(i, z * k); }
+    linerGeo.computeVertexNormals();
+    const paper = fineNoise('#c99a66', 2500, 0.08);
+    cup.add(new THREE.Mesh(linerGeo, new THREE.MeshStandardMaterial({ map: paper, roughness: 0.75, side: THREE.DoubleSide })));
+    const base = new THREE.Mesh(new THREE.CircleGeometry(0.62, 48), M.choc); base.rotation.x = Math.PI / 2; base.position.y = -0.46; cup.add(base);
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.88, 40, 20, 0, TAU, 0, Math.PI / 2), M.choc); dome.position.y = 0.44; dome.scale.y = 0.42; cup.add(dome);
+    const swirl = new THREE.Mesh(rosetteGeo, M.freshCream); swirl.scale.set(1.62, 1.35, 1.62); swirl.position.y = 0.55; swirl.rotation.y = 0.4; cup.add(swirl);
+    [[0.28, 1.15, 0.3], [-0.32, 0.95, 0.38], [0.05, 1.45, -0.2]].forEach(([x, y, z]) => { const p = new THREE.Mesh(pearlGeo, M.gold); p.scale.setScalar(0.07); p.position.set(x, y, z); cup.add(p); });
+    const shard = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.42, 0.02), M.shard); shard.position.set(0.05, 1.78, 0); shard.rotation.set(0.1, 0.5, 0.25); cup.add(shard);
+    shadowsOn(cup); scene.add(cup);
+    // macaron: smooth domed shells, ruffled feet, ganache filling
     const mac = new THREE.Group();
-    [-1, 1].forEach(k => { const s = new THREE.Mesh(new THREE.SphereGeometry(0.8, 36, 20), M.caramel); s.scale.set(1, 0.36, 1); s.position.y = k * 0.26; mac.add(s); });
-    const fill = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 0.72, 0.24, 40), M.ganache); mac.add(fill);
-    scene.add(mac);
+    const shellTex = fineNoise('#c58b54', 3500, 0.06);
+    const shellMat = new THREE.MeshStandardMaterial({ map: shellTex, bumpMap: shellTex, bumpScale: 0.01, roughness: 0.55 });
+    const footGeo = new THREE.TorusGeometry(0.76, 0.09, 12, 90);
+    const fp = footGeo.attributes.position;
+    for (let i = 0; i < fp.count; i++) { const j = 1 + (Math.random() - 0.5) * 0.12; fp.setXYZ(i, fp.getX(i) * (1 + (j - 1) * 0.3), fp.getY(i) * (1 + (j - 1) * 0.3), fp.getZ(i) * j); }
+    footGeo.computeVertexNormals();
+    [-1, 1].forEach(k => {
+      const s = new THREE.Mesh(new THREE.SphereGeometry(0.82, 48, 24, 0, TAU, 0, Math.PI / 2), shellMat);
+      s.scale.set(1, 0.42, 1); s.position.y = k * 0.2; if (k < 0) s.rotation.x = Math.PI; mac.add(s);
+      const f = new THREE.Mesh(footGeo, shellMat); f.rotation.x = Math.PI / 2; f.position.y = k * 0.16; mac.add(f);
+    });
+    const fill = new THREE.Mesh(new THREE.SphereGeometry(0.74, 40, 16), M.ganache); fill.scale.set(1, 0.17, 1); mac.add(fill);
+    shadowsOn(mac); scene.add(mac);
     const state = { p: 0 }, spot = {};
-    const layout = () => { const m = fit(renderer, camera, canvas) < 1; spot.cup = m ? [-1.6, 4.2, 0.6] : [-6.4, 2.6, 0.9]; spot.mac = m ? [1.6, -4.3, 0.55] : [5.6, -1.8, 0.95]; cup.scale.setScalar(spot.cup[2]); mac.scale.setScalar(spot.mac[2]); };
+    const layout = () => { const m = fit(renderer, camera, canvas) < 1; spot.cup = m ? [-1.5, 3.9, 0.6] : [-5.7, 1.5, 0.9]; spot.mac = m ? [1.6, -4.3, 0.55] : [5.6, -1.8, 0.95]; cup.scale.setScalar(spot.cup[2]); mac.scale.setScalar(spot.mac[2]); };
     layout(); addEventListener('resize', layout);
     loop(canvas, t => {
       const p = state.p;
-      cup.position.set(spot.cup[0] + mx * 0.5, spot.cup[1] + Math.sin(t * 1.1) * 0.18 - (1 - p) * 3, 0);
-      cup.rotation.set(0.25 + my * 0.2, t * 0.5, -0.18);
-      mac.position.set(spot.mac[0] - mx * 0.5, spot.mac[1] + Math.cos(t * 0.9) * 0.18 + (1 - p) * 3, 0);
-      mac.rotation.set(0.9 + Math.sin(t * 0.6) * 0.2, t * 0.4, 0.3);
+      cup.position.set(spot.cup[0] + mx * 0.4, spot.cup[1] + Math.sin(t * 1.1) * 0.15 - (1 - p) * 2.4, 0);
+      cup.rotation.set(0.22 + my * 0.15, t * 0.4, -0.15);
+      mac.position.set(spot.mac[0] - mx * 0.4, spot.mac[1] + Math.cos(t * 0.9) * 0.15 + (1 - p) * 2.4, 0);
+      mac.rotation.set(0.32 + Math.sin(t * 0.6) * 0.1, t * 0.3, 0.45);
       renderer.render(scene, camera);
     });
     return state;
