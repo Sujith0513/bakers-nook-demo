@@ -62,11 +62,11 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .hero-title{font-size:clamp(3rem,7.6vw,7rem)}
 .hero-sub{max-width:38ch;color:var(--text2);font-size:clamp(1rem,1.25vw,1.15rem);margin:1.5rem 0 2rem}
 .hero-cta{display:flex;flex-wrap:wrap;gap:16px 26px;align-items:center}
-.hero-look{position:absolute;right:var(--gut);top:40%;z-index:2;max-width:250px;opacity:0;pointer-events:none}
-.hero-look p{font-family:'Fraunces',serif;font-size:1.5rem;line-height:1.2}
-.hero-look ul{list-style:none;margin-top:14px;display:grid;gap:8px;font-size:.92rem;color:var(--text2)}
-.hero-look li{display:flex;gap:10px;align-items:center}
-.hero-look li i{width:12px;height:12px;border-radius:50%;display:block;flex:none}
+.hero-look{position:absolute;right:clamp(40px,12vw,240px);top:34%;z-index:2;max-width:400px;opacity:0;pointer-events:none}
+.hero-look p{font-family:'Fraunces',serif;font-size:clamp(2rem,3vw,3rem);line-height:1.1;letter-spacing:-.01em}
+.hero-look ul{list-style:none;margin-top:24px;display:grid;gap:14px;font-size:clamp(1.05rem,1.3vw,1.3rem);color:var(--cocoa)}
+.hero-look li{display:flex;gap:14px;align-items:center}
+.hero-look li i{width:16px;height:16px;border-radius:50%;display:block;flex:none}
 .hint{position:absolute;right:var(--gut);bottom:clamp(40px,10vh,110px);z-index:2;color:var(--text2);font-size:.85rem;display:flex;gap:10px;align-items:center}
 .hint i{width:34px;height:1px;background:var(--line);display:block;position:relative;overflow:hidden}
 .hint i::after{content:'';position:absolute;inset:0;background:var(--crust);animation:swipe 2.2s ease-in-out infinite}
@@ -563,12 +563,12 @@ footer{background:var(--cocoa);color:rgba(245,239,230,.55);padding:30px var(--gu
       if (!drag) { vel *= 0.92; rotY += vel; rotY *= 0.985; }
       // a gentle turn only; the slice does the talking
       holder.rotation.y = rotY + lerp(-0.2 + Math.sin(t * 0.35) * 0.05, -0.6, s) + mx * 0.06;
-      holder.position.set(mobile ? 0 : lerp(2.3, -0.7, s), mobile ? 0.1 : 0.05, 0);
+      holder.position.set(mobile ? 0 : lerp(2.3, -2.3, s), mobile ? 0.1 : 0.05, 0);
       key.position.set(holder.position.x + 4, 9, 6);
       slice.position.copy(dir).multiplyScalar(s * (mobile ? 0.85 : 1.15));
       slice.position.y = s * 0.08;
       slice.rotation.y = s * 0.22;
-      camera.position.set(mx * 0.25, mobile ? 3.2 : 2.5, mobile ? 19 : lerp(11, 10.4, s));
+      camera.position.set(mx * 0.25, mobile ? 3.2 : 2.5, mobile ? 19 : lerp(11, 11.6, s));
       camera.lookAt(0, mobile ? -2.6 : 0.15, 0);
       renderer.render(scene, camera);
     });
